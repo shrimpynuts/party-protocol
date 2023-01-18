@@ -48,6 +48,7 @@ contract CrowdfundTest is Test, TestUtils {
         uint256 previousTotalContributions
     );
     event Burned(address contributor, uint256 ethUsed, uint256 ethOwed, uint256 votingPower);
+    event RageQuit(address contributor);
     event EmergencyExecuteTargetCalled();
     event EmergencyExecuteDisabled();
     event EmergencyExecute(address target, bytes data, uint256 amountEth);
@@ -1139,6 +1140,84 @@ contract CrowdfundTest is Test, TestUtils {
         assertTrue(cf.supportsInterface(0x01ffc9a7)); // EIP165
         assertTrue(cf.supportsInterface(0x80ac58cd)); // ERC721
         assertTrue(cf.supportsInterface(0x150b7a02)); // ERC721Receiver
+    }
+
+    // One person contributes, and they rage quit.
+    function testRageQuit_oneContributor() external {
+        TestableCrowdfund cf = _createCrowdfund(0);
+        address delegate1 = _randomAddress();
+        address payable contributor1 = _randomAddress();
+        // contributor1 contributes 1 ETH
+        vm.deal(contributor1, 1e18);
+        vm.prank(contributor1);
+        cf.contribute{ value: contributor1.balance }(delegate1, "");
+        assertEq(cf.totalContributions(), 1e18);
+        assertEq(cf.balanceOf(contributor1), 1);
+        // contributor1 rage quits
+        assertEq(contributor1.balance, 0);
+        vm.prank(contributor1);
+        // TODO: Determine exactly how to use expectEmit???
+        _expectEmit0();
+        emit RageQuit(contributor1);
+        cf.rageQuit();
+
+        assertEq(contributor1.balance, 1e18);
+        assertEq(cf.totalContributions(), 0);
+        assertEq(cf.balanceOf(contributor1), 0);
+
+        // They try to burn (after rageQuit should have burnt their participation NFT).
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Crowdfund.WrongLifecycleError.selector,
+                Crowdfund.CrowdfundLifecycle.Active
+            )
+        );
+        cf.burn(contributor1);
+    }
+
+    // two contribute but only part of the second contributor's ETH is used.
+    function testRageQuit_twoContributors_partialContributionUsed() external {
+        TestableCrowdfund cf = _createCrowdfund(0);
+        address delegate1 = _randomAddress();
+        address delegate2 = _randomAddress();
+        address payable contributor1 = _randomAddress();
+        address payable contributor2 = _randomAddress();
+        // contributor1 contributes 1 ETH
+        vm.deal(contributor1, 1e18);
+        vm.prank(contributor1);
+        cf.contribute{ value: contributor1.balance }(delegate1, "");
+        // contributor2 contributes 1 ETH
+        vm.deal(contributor2, 1e18);
+        vm.prank(contributor2);
+        cf.contribute{ value: contributor2.balance }(delegate2, "");
+        // contributor1 rage quits.
+        vm.prank(contributor1);
+        _expectEmit0();
+        emit RageQuit(contributor1);
+        cf.rageQuit();
+        // contributor1 gets back all of their contribution
+        assertEq(contributor1.balance, 1e18);
+        // set up a win for 1 ETH
+        (IERC721[] memory erc721Tokens, uint256[] memory erc721TokenIds) = _createTokens(
+            address(cf),
+            2
+        );
+        vm.expectEmit(false, false, false, true);
+        emit MockPartyFactoryCreateParty(
+            address(cf),
+            address(cf),
+            _createExpectedPartyOptions(cf, 1e18),
+            erc721Tokens,
+            erc721TokenIds
+        );
+        cf.testSetWon(1e18, defaultGovernanceOpts, erc721Tokens, erc721TokenIds);
+
+        cf.burn(contributor2);
+        // contributor2 gets no refund, as entire contribution is used.
+        // TODO: FAILS. THIS SHOULD BE 1 ETH
+        assertEq(contributor2.balance, 1e18);
+        assertEq(contributor1.balance, 1e18);
+        assertEq(address(cf).balance, 0e18);
     }
 }
 

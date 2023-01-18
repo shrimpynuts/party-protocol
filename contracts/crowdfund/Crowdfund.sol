@@ -72,7 +72,7 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
     }
 
     // A record of the refund and governance NFT owed to a contributor if it
-    // could not be received by them from `burn()`.
+    // could not be received by them from `burn()` or `rageQuit()`.
     struct Claim {
         uint256 refund;
         uint256 governanceTokenId;
@@ -107,6 +107,7 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
         address delegate,
         uint256 previousTotalContributions
     );
+    event RageQuit(address contributor);
     event EmergencyExecute(address target, bytes data, uint256 amountEth);
     event EmergencyExecuteDisabled();
 
@@ -266,7 +267,7 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
     }
 
     /// @notice Claim a governance NFT or refund that is owed back but could not be
-    ///         given due to error in `_burn()` (eg. a contract that does not
+    ///         given due to error in `_burn()` or `_ragequit()` (eg. a contract that does not
     ///         implement `onERC721Received()` or cannot receive ETH). Only call
     ///         this if refund and governance NFT minting could not be returned
     ///         with `burn()`.
@@ -309,6 +310,10 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
             totalContributions,
             gateData
         );
+    }
+
+    function rageQuit() public onlyDelegateCall {
+        return _rageQuit(payable(msg.sender), getCrowdfundLifecycle());
     }
 
     /// @inheritdoc EIP165
@@ -640,6 +645,49 @@ abstract contract Crowdfund is Implementation, ERC721Receiver, CrowdfundNFT {
             claims[contributor].refund = ethOwed;
         }
         emit Burned(contributor, ethUsed, ethOwed, votingPower);
+    }
+
+    function _rageQuit(address payable contributor, CrowdfundLifecycle lc) private {
+        // Can only rage quit while still actively crowdfunding.
+        if (lc != CrowdfundLifecycle.Active) {
+            revert WrongLifecycleError(lc);
+        }
+        // Burn participation token.
+        {
+            address splitRecipient_ = splitRecipient;
+            if (contributor == splitRecipient_) {
+                if (_splitRecipientHasBurned) {
+                    revert SplitRecipientAlreadyBurnedError();
+                }
+                _splitRecipientHasBurned = true;
+            }
+            // Revert if already burned or does not exist.
+            if (splitRecipient_ != contributor || _doesTokenExistFor(contributor)) {
+                CrowdfundNFT._burn(contributor);
+            }
+        }
+        // Calculate the total ETH contributed by the contributor.
+        Contribution[] memory contributions = _contributionsByContributor[contributor];
+        uint256 numContributions = contributions.length;
+        uint96 ethOwed = 0;
+        for (uint256 i; i < numContributions; ++i) {
+            // TODO: do we need to load each contribution into memory???
+            // Contribution memory c = contributions[i];
+            ethOwed += contributions[i].amount;
+        }
+        // Decrease total contributions.
+        totalContributions -= ethOwed;
+        // Delete contributions and delegation
+        delete _contributionsByContributor[contributor];
+        delete delegationsByContributor[contributor];
+        // Refund any ETH owed back to the contributor.
+        (bool s, ) = contributor.call{ value: ethOwed }("");
+        if (!s) {
+            // If the transfer fails, the contributor can still come claim it
+            // from the crowdfund.
+            claims[contributor].refund = ethOwed;
+        }
+        emit RageQuit(contributor);
     }
 
     function _getPartyFactory() internal view returns (IPartyFactory) {
